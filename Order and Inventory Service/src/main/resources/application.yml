@@ -1,0 +1,60 @@
+server:
+  port: ${ORDER_INVENTORY_SERVICE_PORT:8083}
+
+spring:
+  config:
+    import: optional:file:.env[.properties]
+  application:
+    name: Order and Inventory Service
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:order_and_inventory_db}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+app:
+  jwt:
+    secret: ${JWT_SECRET:}
+  messaging:
+    order-exchange: order.exchange
+    notification-order-created-queue: notification.order-created.queue
+    order-created-routing-key: order.created
+    order-update-status-queue: order.update.status.queue
+    payment-succeeded-queue: payment.succeeded.queue
+    payment-review-queue: payment.review.queue
+
+  outbox:
+    publish-delay-ms: ${OUTBOX_PUBLISH_DELAY_MS:1000}
+    confirm-timeout-ms: ${OUTBOX_CONFIRM_TIMEOUT_MS:5000}
+
+  order:
+    payment-expiration-minutes: ${ORDER_PAYMENT_EXPIRATION_MINUTES:15}
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    com.example.identityuser: INFO
+
+grpc:
+  server:
+    port: -1
+  client:
+    product-service:
+      address: ${PRODUCT_SERVICE_GRPC_ADDRESS:static://localhost:9090}
+      negotiationType: plaintext

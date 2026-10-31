@@ -1,0 +1,93 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.5.6'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'com.google.protobuf' version '0.9.5'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+description = 'order-inventory-service'
+
+ext {
+    grpcVersion = '1.75.0'
+    protobufVersion = '4.32.1'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+/**
+ * Đồng bộ toàn bộ grpc-* dependency về cùng một version
+ * để tránh lỗi binary incompatibility.
+ */
+configurations.configureEach {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'io.grpc') {
+            details.useVersion grpcVersion
+            details.because('gRPC modules must be binary-compatible with grpc-api')
+        }
+    }
+}
+
+protobuf {
+    protoc {artifact = "com.google.protobuf:protoc:${protobufVersion}"}
+    plugins {
+        grpc {artifact = "io.grpc:protoc-gen-grpc-java:${grpcVersion}"}
+    }
+
+    generateProtoTasks {
+        all().each { task ->
+            task.plugins {
+                grpc {}
+            }
+        }
+    }
+}
+
+dependencies {
+
+    // ===== Spring Boot Starters =====
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-amqp'
+
+    // ===== Security =====
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+
+    // ===== gRPC =====
+    implementation 'net.devh:grpc-spring-boot-starter:3.1.0.RELEASE'
+    implementation "io.grpc:grpc-protobuf:${grpcVersion}"
+    implementation "io.grpc:grpc-stub:${grpcVersion}"
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+
+    // ===== Database =====
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // ===== Lombok =====
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+
+    // ===== Testing =====
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.security:spring-security-test'
+    testImplementation 'org.springframework.amqp:spring-rabbit-test'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

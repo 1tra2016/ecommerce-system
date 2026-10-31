@@ -1,0 +1,319 @@
+name: omnichannel-ecommerce
+
+services:
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${API_GATEWAY_HOST_PORT:-8888}:8888"
+    environment:
+      API_GATEWAY_PORT: 8888
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.docker}
+      IDENTITY_SERVICE_URL: http://user-service:8081
+      PRODUCT_SERVICE_URL: http://product-service:8082
+      ORDER_SERVICE_URL: http://order-inventory-service:8083
+      INVENTORY_SERVICE_URL: http://order-inventory-service:8083
+      PAYMENT_SERVICE_URL: http://payment-billing-service:8084
+      NOTIFICATION_SERVICE_URL: http://notification-service:8085
+    depends_on:
+      user-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+      order-inventory-service:
+        condition: service_started
+      payment-billing-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+    networks:
+      - backend-network
+
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      IDENTITY_SERVICE_PORT: 8081
+      DB_HOST: user-db
+      DB_PORT: 5432
+      DB_NAME: ${USER_DB_NAME:-identity_db}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.docker}
+    depends_on:
+      user-db:
+        condition: service_healthy
+    networks:
+      - backend-network
+
+  product-service:
+    build:
+      context: ./product-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PRODUCT_SERVICE_PORT: 8082
+      PRODUCT_GRPC_SERVER_PORT: 9090
+      DB_HOST: product-db
+      DB_PORT: 5432
+      DB_NAME: ${PRODUCT_DB_NAME:-product_db}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.docker}
+    depends_on:
+      product-db:
+        condition: service_healthy
+    networks:
+      - backend-network
+
+  order-inventory-service:
+    build:
+      context: ./Order and Inventory Service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ORDER_INVENTORY_SERVICE_PORT: 8083
+      DB_HOST: order-db
+      DB_PORT: 5432
+      DB_NAME: ${ORDER_DB_NAME:-order_and_inventory_db}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_DEFAULT_PASS:?Set RABBITMQ_DEFAULT_PASS in .env.docker}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.docker}
+      PRODUCT_SERVICE_GRPC_ADDRESS: static://product-service:9090
+      ORDER_PAYMENT_EXPIRATION_MINUTES: ${ORDER_PAYMENT_EXPIRATION_MINUTES:-15}
+      OUTBOX_PUBLISH_DELAY_MS: ${OUTBOX_PUBLISH_DELAY_MS:-1000}
+      OUTBOX_CONFIRM_TIMEOUT_MS: ${OUTBOX_CONFIRM_TIMEOUT_MS:-5000}
+    depends_on:
+      order-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      product-service:
+        condition: service_started
+    networks:
+      - backend-network
+
+  payment-billing-service:
+    build:
+      context: ./Payment and Billing Service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      PAYMENT_SERVICE_PORT: 8084
+      DB_HOST: payment-db
+      DB_PORT: 5432
+      DB_NAME: ${PAYMENT_DB_NAME:-payment_db}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_DEFAULT_PASS:?Set RABBITMQ_DEFAULT_PASS in .env.docker}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env.docker}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?Set STRIPE_SECRET_KEY in .env.docker}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_WEBHOOK_SECRET_FILE: /run/stripe/webhook-secret
+      PAYMENT_SUCCESS_URL: ${PAYMENT_SUCCESS_URL:-http://localhost:8888/api/payments/success}
+      PAYMENT_CANCEL_URL: ${PAYMENT_CANCEL_URL:-http://localhost:8888/api/payments/cancel}
+      OUTBOX_PUBLISH_DELAY_MS: ${OUTBOX_PUBLISH_DELAY_MS:-1000}
+      OUTBOX_CONFIRM_TIMEOUT_MS: ${OUTBOX_CONFIRM_TIMEOUT_MS:-5000}
+    volumes:
+      - stripe-webhook-data:/run/stripe:ro
+    depends_on:
+      payment-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      stripe-cli:
+        condition: service_healthy
+    networks:
+      - backend-network
+
+  stripe-cli:
+    image: stripe/stripe-cli:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        secret="$$(stripe listen --api-key "$$STRIPE_SECRET_KEY" --print-secret)"
+        test -n "$$secret"
+        printf '%s' "$$secret" > /run/stripe/webhook-secret
+        chmod 0444 /run/stripe/webhook-secret
+        exec stripe listen --api-key "$$STRIPE_SECRET_KEY" --events=checkout.session.completed --forward-to=http://payment-billing-service:8084/api/payments/webhook
+    environment:
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?Set STRIPE_SECRET_KEY in .env.docker}
+    volumes:
+      - stripe-webhook-data:/run/stripe
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/stripe/webhook-secret"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks:
+      - backend-network
+
+  notification-service:
+    build:
+      context: ./Notification Service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NOTIFICATION_SERVICE_PORT: 8085
+      DB_HOST: notification-db
+      DB_PORT: 5432
+      DB_NAME: ${NOTIFICATION_DB_NAME:-notification_db}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_DEFAULT_PASS:?Set RABBITMQ_DEFAULT_PASS in .env.docker}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASS: ${MAIL_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-${MAIL_USER:-}}
+      NOTIFICATION_RABBITMQ_MAX_ATTEMPTS: ${NOTIFICATION_RABBITMQ_MAX_ATTEMPTS:-5}
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - backend-network
+
+  user-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${USER_DB_NAME:-identity_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+    volumes:
+      - user-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${USER_DB_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend-network
+
+  product-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PRODUCT_DB_NAME:-product_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+    volumes:
+      - product-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${PRODUCT_DB_HOST_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend-network
+
+  order-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ORDER_DB_NAME:-order_and_inventory_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${ORDER_DB_HOST_PORT:-5435}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend-network
+
+  payment-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PAYMENT_DB_NAME:-payment_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+    volumes:
+      - payment-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${PAYMENT_DB_HOST_PORT:-5436}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend-network
+
+  notification-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${NOTIFICATION_DB_NAME:-notification_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.docker}
+    volumes:
+      - notification-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${NOTIFICATION_DB_HOST_PORT:-5437}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend-network
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?Set RABBITMQ_DEFAULT_PASS in .env.docker}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:${RABBITMQ_AMQP_HOST_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_HOST_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    networks:
+      - backend-network
+
+volumes:
+  user-db-data:
+  product-db-data:
+  order-db-data:
+  payment-db-data:
+  notification-db-data:
+  rabbitmq-data:
+  stripe-webhook-data:
+
+networks:
+  backend-network:
+    driver: bridge
